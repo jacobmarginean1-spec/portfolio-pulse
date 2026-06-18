@@ -5,7 +5,7 @@ Most AI stock dashboards are hype machines: paste a ticker, get a wall of reason
 
 Live prices come from Finnhub. News analysis, balanced cases, and the portfolio-level assessment come from Claude. **You bring your own API keys** (both have free tiers) and they live only in your browser.
 
-🔗 **Live demo:** YOUR_VERCEL_URL
+Disclaimer: I have no clue what im doing Claude Coded this
 
 ![screenshot](docs/screenshot.png)
 
