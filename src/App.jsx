@@ -1,26 +1,16 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Plus, X, RefreshCw, TrendingUp, Eye, ChevronUp, ChevronDown,
-  GripVertical, Sun, Moon, Link, StickyNote, Layers, Wallet, Settings, KeyRound,
+  GripVertical, Sun, Moon, Link, StickyNote, Layers, Wallet, Settings,
 } from "lucide-react";
 
-// ----------------------------------------------------------------------------
-// CONFIG
-// ----------------------------------------------------------------------------
-// Where the Anthropic proxy lives. In production on Vercel this is just "/api/analyze".
-// For local dev without a function runner, you can deploy the proxy and point here.
+// Anthropic proxy endpoint (Vercel serverless function). See api/analyze.js.
 const PROXY_URL = "/api/analyze";
 
-// localStorage keys
 const LS = {
-  tickers: "pp-tickers",
-  results: "pp-results",
-  theme: "pp-theme",
-  notes: "pp-notes",
-  shares: "pp-shares",
-  digest: "pp-digest",
-  anthropicKey: "pp-anthropic-key",
-  finnhubKey: "pp-finnhub-key",
+  tickers: "pp-tickers", results: "pp-results", theme: "pp-theme",
+  notes: "pp-notes", shares: "pp-shares", digest: "pp-digest",
+  anthropicKey: "pp-anthropic-key", finnhubKey: "pp-finnhub-key",
 };
 
 const STALE_MS = 24 * 60 * 60 * 1000;
@@ -32,20 +22,14 @@ const KNOWN_SECTORS = {
   GOOG: "Tech / Ads", GOOGL: "Tech / Ads", META: "Social / Tech", ETH: "Crypto",
 };
 
-// Finnhub uses different symbols for crypto. Map the common ones.
+// Finnhub crypto symbol mapping
 const CRYPTO_MAP = { BTC: "BINANCE:BTCUSDT", ETH: "BINANCE:ETHUSDT" };
 
-function lsGet(key, fallback) {
-  try {
-    const v = localStorage.getItem(key);
-    return v == null ? fallback : JSON.parse(v);
-  } catch {
-    return fallback;
-  }
+function lsGet(key, fb) {
+  try { const v = localStorage.getItem(key); return v == null ? fb : JSON.parse(v); }
+  catch { return fb; }
 }
-function lsSet(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
+function lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 
 function sectorColor(sector, dark) {
   const d = dark;
@@ -70,18 +54,13 @@ function fmtMoney(n) {
 }
 
 function extractSources(content) {
-  const sources = [];
-  const seen = new Set();
+  const sources = []; const seen = new Set();
   for (const block of content || []) {
     const items = block?.content;
     if (Array.isArray(items)) {
       for (const item of items) {
-        const url = item?.url;
-        const title = item?.title;
-        if (url && !seen.has(url)) {
-          seen.add(url);
-          sources.push({ url, title: title || url });
-        }
+        const url = item?.url, title = item?.title;
+        if (url && !seen.has(url)) { seen.add(url); sources.push({ url, title: title || url }); }
       }
     }
   }
@@ -108,11 +87,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [anthropicKey, setAnthropicKey] = useState(lsGet(LS.anthropicKey, ""));
   const [finnhubKey, setFinnhubKey] = useState(lsGet(LS.finnhubKey, ""));
+  const [akInput, setAkInput] = useState("");
+  const [fkInput, setFkInput] = useState("");
 
   const resultsRef = useRef(results);
   const tickersRef = useRef(tickers);
   const cardRefs = useRef({});
-
   useEffect(() => { resultsRef.current = results; }, [results]);
   useEffect(() => { tickersRef.current = tickers; }, [tickers]);
 
@@ -121,112 +101,74 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Open settings automatically if no keys yet.
   useEffect(() => {
-    if (!anthropicKey || !finnhubKey) setShowSettings(true);
+    if (!anthropicKey || !finnhubKey) { setShowSettings(true); }
+    setAkInput(anthropicKey); setFkInput(finnhubKey);
   }, []); // eslint-disable-line
 
-  // ---- Live price fetching (Finnhub, direct browser calls allowed) ----
-  const fetchPrice = async (ticker) => {
-    if (!finnhubKey) return;
+  // ---- live prices (Finnhub, direct browser calls OK) ----
+  const fetchPrice = async (ticker, key = finnhubKey) => {
+    if (!key) return;
     const symbol = CRYPTO_MAP[ticker] || ticker;
     try {
-      const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${finnhubKey}`);
+      const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${key}`);
       const d = await r.json();
-      // Finnhub quote: c = current, dp = percent change, t = timestamp
       if (typeof d.c === "number" && d.c > 0) {
-        setLivePrices((p) => ({
-          ...p,
-          [ticker]: { price: d.c, changePct: d.dp, at: d.t ? new Date(d.t * 1000).toLocaleTimeString() : null },
-        }));
+        setLivePrices((p) => ({ ...p, [ticker]: { price: d.c, changePct: d.dp, at: d.t ? new Date(d.t * 1000).toLocaleTimeString() : null } }));
       }
     } catch {}
   };
-
-  const fetchAllPrices = async () => {
+  const fetchAllPrices = async (key = finnhubKey) => {
     for (const t of tickersRef.current) {
-      await fetchPrice(t);
-      await new Promise((r) => setTimeout(r, 1100)); // free tier ~60/min
+      await fetchPrice(t, key);
+      await new Promise((r) => setTimeout(r, 1100));
     }
   };
+  useEffect(() => { if (finnhubKey) fetchAllPrices(finnhubKey); }, [finnhubKey]); // eslint-disable-line
 
-  useEffect(() => {
-    if (finnhubKey) fetchAllPrices();
-    // eslint-disable-next-line
-  }, [finnhubKey]);
-
-  // ---- persistence helpers ----
+  // ---- persistence ----
   const saveTickers = (arr) => { setTickers(arr); tickersRef.current = arr; lsSet(LS.tickers, arr); };
   const persistResults = (r) => { setResults(r); resultsRef.current = r; lsSet(LS.results, r); };
-  const saveNote = (t, text) => {
-    const n = { ...notes };
-    if (text.trim()) n[t] = text.trim(); else delete n[t];
-    setNotes(n); lsSet(LS.notes, n);
-  };
-  const saveShares = (t, val) => {
-    const s = { ...shares };
-    const num = parseFloat(val);
-    if (!isNaN(num) && num > 0) s[t] = num; else delete s[t];
-    setShares(s); lsSet(LS.shares, s);
-  };
+  const saveNote = (t, text) => { const n = { ...notes }; if (text.trim()) n[t] = text.trim(); else delete n[t]; setNotes(n); lsSet(LS.notes, n); };
+  const saveShares = (t, val) => { const s = { ...shares }; const num = parseFloat(val); if (!isNaN(num) && num > 0) s[t] = num; else delete s[t]; setShares(s); lsSet(LS.shares, s); };
   const toggleTheme = () => { const n = !dark; setDark(n); lsSet(LS.theme, n ? "dark" : "light"); };
-
-  const saveKeys = (ak, fk) => {
-    setAnthropicKey(ak); setFinnhubKey(fk);
-    lsSet(LS.anthropicKey, ak); lsSet(LS.finnhubKey, fk);
-  };
 
   const addTicker = () => {
     const t = input.trim().toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
-    if (t && t.length <= 10 && !tickers.includes(t)) {
-      saveTickers([...tickers, t]);
-      fetchPrice(t);
-    }
+    if (t && t.length <= 10 && !tickers.includes(t)) { saveTickers([...tickers, t]); fetchPrice(t); }
     setInput("");
   };
-
   const removeTicker = (t) => {
     saveTickers(tickers.filter((x) => x !== t));
     const r = { ...resultsRef.current }; delete r[t]; persistResults(r);
   };
 
   const handleDragStart = (e, i) => {
-    e.preventDefault();
-    setDragIdx(i);
+    e.preventDefault(); setDragIdx(i);
     const move = (ev) => {
       const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
-      const list = tickersRef.current;
-      let target = null;
+      const list = tickersRef.current; let target = null;
       for (let k = 0; k < list.length; k++) {
-        const el = cardRefs.current[list[k]];
-        if (!el) continue;
+        const el = cardRefs.current[list[k]]; if (!el) continue;
         const rect = el.getBoundingClientRect();
         if (y >= rect.top && y <= rect.bottom) { target = k; break; }
       }
       setDragIdx((cur) => {
         if (cur === null || target === null || target === cur) return cur;
         const arr = [...tickersRef.current];
-        const [item] = arr.splice(cur, 1);
-        arr.splice(target, 0, item);
-        tickersRef.current = arr; setTickers(arr);
-        return target;
+        const [item] = arr.splice(cur, 1); arr.splice(target, 0, item);
+        tickersRef.current = arr; setTickers(arr); return target;
       });
     };
     const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("touchmove", move);
-      window.removeEventListener("touchend", up);
-      setDragIdx(null);
-      lsSet(LS.tickers, tickersRef.current);
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      window.removeEventListener("touchmove", move); window.removeEventListener("touchend", up);
+      setDragIdx(null); lsSet(LS.tickers, tickersRef.current);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("touchmove", move, { passive: false });
-    window.addEventListener("touchend", up);
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+    window.addEventListener("touchmove", move, { passive: false }); window.addEventListener("touchend", up);
   };
 
-  // ---- Claude analysis via proxy ----
   const callClaude = async (body) => {
     const res = await fetch(PROXY_URL, {
       method: "POST",
@@ -246,7 +188,7 @@ export default function App() {
     if (loading[ticker]) return;
     if (!anthropicKey) { setShowSettings(true); return; }
     setLoading((l) => ({ ...l, [ticker]: true }));
-    fetchPrice(ticker); // refresh live price alongside
+    fetchPrice(ticker);
     try {
       const data = await callClaude({
         model: "claude-sonnet-4-6",
@@ -302,11 +244,10 @@ macroEvents rules: ONLY include events significant enough to plausibly cause a d
     setRunningAll(false);
   };
 
-  // ---- portfolio math (uses LIVE prices, falls back to nothing) ----
+  // ---- portfolio math (live prices) ----
   const priceOf = (t) => livePrices[t]?.price ?? null;
   const positions = tickers.map((t) => {
-    const price = priceOf(t);
-    const qty = shares[t];
+    const price = priceOf(t), qty = shares[t];
     return { ticker: t, price, qty, value: price && qty ? price * qty : null };
   });
   const valuedPositions = positions.filter((p) => p.value !== null);
@@ -318,22 +259,17 @@ macroEvents rules: ONLY include events significant enough to plausibly cause a d
     const available = tickersRef.current.map((t) => {
       const r = resultsRef.current[t];
       if (!r || r.error || !r.summary) return null;
-      const price = priceOf(t);
-      const qty = shares[t];
+      const price = priceOf(t), qty = shares[t];
       const value = price && qty ? price * qty : null;
       return {
-        ticker: t, sector: r.sector || KNOWN_SECTORS[t] || null,
-        sharesOwned: qty || null,
+        ticker: t, sector: r.sector || KNOWN_SECTORS[t] || null, sharesOwned: qty || null,
         positionValue: value ? Math.round(value * 100) / 100 : null,
         weightPct: value && totalValue > 0 ? Math.round((value / totalValue) * 1000) / 10 : null,
         summary: r.summary, bullCase: r.bullCase, bearCase: r.bearCase,
         catalysts: r.catalysts, macroEvents: r.macroEvents,
       };
     }).filter(Boolean);
-    if (available.length < 2) {
-      setDigest({ error: "Analyze at least 2 tickers first." });
-      return;
-    }
+    if (available.length < 2) { setDigest({ error: "Analyze at least 2 tickers first." }); return; }
     setDigestLoading(true);
     try {
       const data = await callClaude({
@@ -372,11 +308,7 @@ Respond ONLY with valid JSON (no markdown fences, no preamble):
 
   const allCollapsible = tickers.filter((t) => results[t] && !results[t].error);
   const allCollapsed = allCollapsible.length > 0 && allCollapsible.every((t) => collapsed[t]);
-  const toggleCollapseAll = () => {
-    const next = {};
-    allCollapsible.forEach((t) => (next[t] = !allCollapsed));
-    setCollapsed(next);
-  };
+  const toggleCollapseAll = () => { const next = {}; allCollapsible.forEach((t) => (next[t] = !allCollapsed)); setCollapsed(next); };
 
   const T = dark ? THEME_DARK : THEME_LIGHT;
 
@@ -386,17 +318,11 @@ Respond ONLY with valid JSON (no markdown fences, no preamble):
         <div className="flex items-start justify-between mb-1">
           <h1 className={`text-2xl font-bold ${T.title}`}>Portfolio Pulse</h1>
           <div className="flex gap-2">
-            <button onClick={() => setShowSettings(true)} className={`${T.smallBtn} rounded-sm p-2 transition-colors`} title="Settings / API keys">
-              <Settings size={16} />
-            </button>
-            <button onClick={toggleTheme} className={`${T.smallBtn} rounded-sm p-2 transition-colors`} title={dark ? "Light mode" : "Dark mode"}>
-              {dark ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
+            <button onClick={() => setShowSettings(true)} className={`${T.smallBtn} rounded-sm p-2 transition-colors`} title="Settings / API keys"><Settings size={16} /></button>
+            <button onClick={toggleTheme} className={`${T.smallBtn} rounded-sm p-2 transition-colors`} title={dark ? "Light mode" : "Dark mode"}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
           </div>
         </div>
-        <p className={`${T.sub} text-sm mb-6`}>
-          Neutral, source-attributed news analysis with live prices. Educational, not financial advice.
-        </p>
+        <p className={`${T.sub} text-sm mb-6`}>Neutral, source-attributed news analysis with live prices. Educational, not financial advice.</p>
 
         {(!anthropicKey || !finnhubKey) && !showSettings && (
           <div className={`${T.macroBox} border-l-2 rounded-sm px-3 py-2 mb-4 text-sm flex items-center justify-between`}>
@@ -405,83 +331,202 @@ Respond ONLY with valid JSON (no markdown fences, no preamble):
           </div>
         )}
 
-        {/* controls */}
         <div className="flex gap-2 mb-3 flex-wrap">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addTicker()}
-            placeholder="Add ticker (e.g. TSLA)"
-            className={`flex-1 min-w-[140px] ${T.input} border rounded-sm px-3 py-2 text-sm focus:outline-none pf-mono`}
-          />
-          <button onClick={addTicker} className={`${T.addBtn} rounded-sm px-4 py-2 flex items-center gap-1 text-sm font-medium transition-colors`}>
-            <Plus size={16} /> Add
-          </button>
-          <button onClick={analyzeAll} disabled={runningAll} className={`${T.allBtn} disabled:opacity-50 rounded-sm px-4 py-2 flex items-center gap-1 text-sm font-medium transition-colors`}>
-            <RefreshCw size={16} className={runningAll ? "animate-spin" : ""} />
-            {runningAll ? "Running..." : "Analyze All"}
-          </button>
-          <button onClick={generateDigest} disabled={digestLoading} className={`${T.smallBtn} rounded-sm px-3 py-2 flex items-center gap-1 text-sm font-medium transition-colors disabled:opacity-50`} title="Cross-portfolio assessment (no searches)">
-            <Layers size={16} className={digestLoading ? "animate-pulse" : ""} />
-            {digestLoading ? "Working..." : "Digest"}
-          </button>
+          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addTicker()} placeholder="Add ticker (e.g. TSLA)" className={`flex-1 min-w-[140px] ${T.input} border rounded-sm px-3 py-2 text-sm focus:outline-none pf-mono`} />
+          <button onClick={addTicker} className={`${T.addBtn} rounded-sm px-4 py-2 flex items-center gap-1 text-sm font-medium transition-colors`}><Plus size={16} /> Add</button>
+          <button onClick={analyzeAll} disabled={runningAll} className={`${T.allBtn} disabled:opacity-50 rounded-sm px-4 py-2 flex items-center gap-1 text-sm font-medium transition-colors`}><RefreshCw size={16} className={runningAll ? "animate-spin" : ""} />{runningAll ? "Running..." : "Analyze All"}</button>
+          <button onClick={generateDigest} disabled={digestLoading} className={`${T.smallBtn} rounded-sm px-3 py-2 flex items-center gap-1 text-sm font-medium transition-colors disabled:opacity-50`} title="Cross-portfolio assessment (no searches)"><Layers size={16} className={digestLoading ? "animate-pulse" : ""} />{digestLoading ? "Working..." : "Digest"}</button>
           {allCollapsible.length > 0 && (
-            <button onClick={toggleCollapseAll} className={`${T.smallBtn} rounded-sm px-3 py-2 flex items-center gap-1 text-sm font-medium transition-colors`}>
-              {allCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-              {allCollapsed ? "Expand" : "Collapse"}
-            </button>
+            <button onClick={toggleCollapseAll} className={`${T.smallBtn} rounded-sm px-3 py-2 flex items-center gap-1 text-sm font-medium transition-colors`}>{allCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}{allCollapsed ? "Expand" : "Collapse"}</button>
           )}
         </div>
 
         {valuedPositions.length > 0 && (
           <div className={`${T.valueBar} border rounded-sm px-4 py-3 mb-3 flex items-baseline gap-3 flex-wrap`}>
-            <span className="flex items-center gap-1.5">
-              <Wallet size={14} className={T.digestLabel} />
-              <span className={`${T.label} text-xs uppercase tracking-wider`}>Portfolio Value</span>
-            </span>
+            <span className="flex items-center gap-1.5"><Wallet size={14} className={T.digestLabel} /><span className={`${T.label} text-xs uppercase tracking-wider`}>Portfolio Value</span></span>
             <span className={`text-xl font-bold ${T.priceText} pf-mono`}>{fmtMoney(totalValue)}</span>
             <span className={`text-xs ${T.meta}`}>{valuedPositions.length} of {tickers.length} positions · live prices</span>
           </div>
         )}
 
-        {digest && <DigestCard digest={digest} T={T} onClose={() => { setDigest(null); lsSet(LS.digest, null); }} />}
+        {digest && (
+          <div className={`${T.digestBox} border rounded-sm p-4 mb-6 text-sm`}>
+            <div className="flex items-center justify-between mb-2">
+              <span className={`${T.digestLabel} text-xs uppercase tracking-wider font-semibold`}>Portfolio Assessment</span>
+              <div className="flex items-center gap-2">
+                {digest.generatedAt && <span className={`text-[10px] ${T.meta}`}>{digest.generatedAt}</span>}
+                <button onClick={() => { setDigest(null); lsSet(LS.digest, null); }} className={T.grip}><X size={12} /></button>
+              </div>
+            </div>
+            {digest.error ? <p className={T.error}>{digest.error}</p> : (
+              <div className="space-y-3">
+                {digest.portfolioOutlook && (<div><div className={`${T.label} text-xs uppercase tracking-wider mb-0.5`}>Overall Outlook</div><p className={T.body}>{digest.portfolioOutlook}</p></div>)}
+                {digest.composition && (<div><div className={`${T.label} text-xs uppercase tracking-wider mb-0.5`}>Composition</div><p className={T.body}>{digest.composition}</p></div>)}
+                {digest.sharedRisks?.length > 0 && (<div><div className={`${T.label} text-xs uppercase tracking-wider mb-0.5`}>Shared Risks</div><ul className={`list-disc list-inside ${T.body} space-y-0.5`}>{digest.sharedRisks.map((s, i) => <li key={i}>{s}</li>)}</ul></div>)}
+                {digest.conflictingSignals?.length > 0 && (<div><div className={`${T.label} text-xs uppercase tracking-wider mb-0.5`}>Conflicting Signals</div><ul className={`list-disc list-inside ${T.body} space-y-0.5`}>{digest.conflictingSignals.map((s, i) => <li key={i}>{s}</li>)}</ul></div>)}
+                {digest.keyCatalysts?.length > 0 && (<div><div className={`${T.label} text-xs uppercase tracking-wider mb-0.5`}>Key Catalysts</div><ul className={`list-disc list-inside ${T.body} space-y-0.5`}>{digest.keyCatalysts.map((s, i) => <li key={i}>{s}</li>)}</ul></div>)}
+                {digest.principles?.length > 0 && (
+                  <div className={`${T.catBox} border-l-2 rounded-sm px-3 py-2`}>
+                    <div className={`${T.catLabel} text-xs uppercase tracking-wider mb-1`}>🎓 Portfolio Principles</div>
+                    <ul className={`${T.bodyMuted} space-y-1.5 list-disc list-inside`}>{digest.principles.map((p, i) => <li key={i}>{p}</li>)}</ul>
+                    <p className={`${T.meta} text-[10px] mt-1.5`}>Educational concepts from academic finance applied to your holdings — not personalized advice.</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="space-y-4">
-          {tickers.map((t, i) => (
-            <TickerCard
-              key={t} t={t} i={i}
-              r={results[t]} live={livePrices[t]}
-              loading={loading[t]} runningAll={runningAll}
-              collapsed={collapsed[t]} dragging={dragIdx === i}
-              sector={results[t]?.sector || KNOWN_SECTORS[t]}
-              note={notes[t]} shares={shares[t]} totalValue={totalValue}
-              showSources={showSources[t]} editingNote={editingNote === t}
-              now={now} T={T} dark={dark}
-              cardRef={(el) => (cardRefs.current[t] = el)}
-              onDragStart={(e) => handleDragStart(e, i)}
-              onAnalyze={() => analyze(t)}
-              onRemove={() => removeTicker(t)}
-              onToggleCollapse={() => setCollapsed((c) => ({ ...c, [t]: !c[t] }))}
-              onToggleNote={() => setEditingNote(editingNote === t ? null : t)}
-              onSaveNote={(v) => { saveNote(t, v); setEditingNote(null); }}
-              onSaveShares={(v) => saveShares(t, v)}
-              onToggleSources={() => setShowSources((s) => ({ ...s, [t]: !s[t] }))}
-            />
-          ))}
+          {tickers.map((t, i) => {
+            const r = results[t];
+            const hasAnalysis = r && !r.error;
+            const isCollapsed = collapsed[t];
+            const sector = r?.sector || KNOWN_SECTORS[t];
+            const sc = sectorColor(sector, dark);
+            const isStale = hasAnalysis && r.fetchedAtMs && now - r.fetchedAtMs > STALE_MS;
+            const note = notes[t];
+            const qty = shares[t];
+            const lp = livePrices[t];
+            const price = lp?.price ?? null;
+            const posValue = price && qty ? price * qty : null;
+            const weight = posValue && totalValue > 0 ? (posValue / totalValue) * 100 : null;
+            const changePct = lp?.changePct;
+            return (
+              <div key={t} ref={(el) => (cardRefs.current[t] = el)} className={`${T.card} border rounded-sm p-4 transition-shadow ${dragIdx === i ? T.cardDrag : ""}`}>
+                <div className="flex items-center justify-between mb-2 gap-2">
+                  <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                    <span onPointerDown={(e) => handleDragStart(e, i)} className={`cursor-grab active:cursor-grabbing ${T.grip} touch-none flex-shrink-0`} title="Drag to reorder"><GripVertical size={16} /></span>
+                    <span className={`text-lg font-semibold ${T.tickerText} pf-mono`}>{t}</span>
+                    {sector && <span className={`text-[10px] uppercase tracking-wider border rounded-sm px-1.5 py-0.5 ${sc}`}>{sector}</span>}
+                    {isStale && <span className={`text-[10px] uppercase tracking-wider border rounded-sm px-1.5 py-0.5 ${T.stale}`} title={`Last updated ${r.fetchedAt}`}>Stale</span>}
+                    {r?.fetchedAt && !r.error && !isStale && <span className={`text-[10px] ${T.meta} truncate`}>upd {r.fetchedAt}</span>}
+                  </div>
+                  <div className="flex gap-2 flex-shrink-0 items-center">
+                    <input type="number" min="0" step="any" placeholder="qty" defaultValue={qty || ""} onBlur={(e) => saveShares(t, e.target.value)} onKeyDown={(e) => e.key === "Enter" && e.target.blur()} className={`w-16 ${T.sharesInput} border rounded-sm px-2 py-1 text-xs focus:outline-none pf-mono`} title="Shares owned" />
+                    <button onClick={() => setEditingNote(editingNote === t ? null : t)} className={`text-xs ${T.smallBtn} rounded-sm px-2 py-1.5 transition-colors ${note ? "ring-1 ring-amber-500/50" : ""}`} title="Your notes"><StickyNote size={12} /></button>
+                    {hasAnalysis && <button onClick={() => setCollapsed((c) => ({ ...c, [t]: !c[t] }))} className={`text-xs ${T.smallBtn} rounded-sm px-2 py-1.5 transition-colors`} title={isCollapsed ? "Expand" : "Collapse"}>{isCollapsed ? <ChevronDown size={12} /> : <ChevronUp size={12} />}</button>}
+                    <button onClick={() => analyze(t)} disabled={loading[t] || runningAll} className={`text-xs ${T.smallBtn} rounded-sm px-3 py-1.5 flex items-center gap-1 disabled:opacity-50 transition-colors`}><RefreshCw size={12} className={loading[t] ? "animate-spin" : ""} />{loading[t] ? "Analyzing..." : "Analyze"}</button>
+                    <button onClick={() => removeTicker(t)} className={`text-xs ${T.delBtn} rounded-sm px-2 py-1.5 transition-colors`}><X size={12} /></button>
+                  </div>
+                </div>
+
+                {editingNote === t && (
+                  <textarea autoFocus defaultValue={note || ""} placeholder="Your thesis, entry price, reminders... (saved when you click away)" onBlur={(e) => { saveNote(t, e.target.value); setEditingNote(null); }} className={`w-full ${T.input} border rounded-sm px-3 py-2 text-sm focus:outline-none mb-2 min-h-[60px]`} />
+                )}
+                {note && editingNote !== t && (
+                  <div className={`${T.noteBox} border rounded-sm px-3 py-1.5 mb-2 text-xs ${T.noteText} flex items-start gap-1.5`}><StickyNote size={11} className="mt-0.5 flex-shrink-0 opacity-60" /><span className="whitespace-pre-wrap">{note}</span></div>
+                )}
+
+                {/* live price line (always shown if available) */}
+                {price !== null && (isCollapsed || !hasAnalysis) && (
+                  <div className={`flex items-baseline gap-2 text-sm ${T.meta} flex-wrap pf-mono`}>
+                    <span className={`font-semibold ${T.body}`}>{fmtMoney(price)}</span>
+                    {typeof changePct === "number" && <span className={changePct < 0 ? T.down : T.up}>{changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%</span>}
+                    {posValue !== null && <span className={T.meta}>· {qty} sh = <span className={T.body}>{fmtMoney(posValue)}</span>{weight !== null && ` (${weight.toFixed(1)}%)`}</span>}
+                  </div>
+                )}
+
+                {hasAnalysis && !isCollapsed && (
+                  <div className="space-y-3 text-sm">
+                    {price !== null && (
+                      <div className={`flex items-baseline gap-2 ${T.priceBox} rounded-sm px-3 py-2 border-l-2 flex-wrap pf-mono`}>
+                        <span className={`text-xl font-bold ${T.priceText}`}>{fmtMoney(price)}</span>
+                        {typeof changePct === "number" && <span className={`text-sm font-medium ${changePct < 0 ? T.down : T.up}`}>{changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%</span>}
+                        {posValue !== null && <span className={`text-xs ${T.meta}`}>{qty} sh = <span className={`${T.body} font-medium`}>{fmtMoney(posValue)}</span>{weight !== null && ` · ${weight.toFixed(1)}% of portfolio`}</span>}
+                        {lp?.at && <span className={`text-xs ${T.meta} ml-auto`}>{lp.at}</span>}
+                      </div>
+                    )}
+                    <div><div className={`${T.label} text-xs uppercase tracking-wider mb-1`}>Recent News</div><p className={T.body}>{r.summary}</p></div>
+                    {(r.bullCase || r.bearCase) && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className={`${T.bullBox} border-l-2 rounded-sm px-3 py-2`}><div className={`${T.bullLabel} text-xs uppercase tracking-wider mb-1`}>Bull Case</div><p className={T.bodyMuted}>{r.bullCase || "—"}</p></div>
+                        <div className={`${T.bearBox} border-l-2 rounded-sm px-3 py-2`}><div className={`${T.bearLabel} text-xs uppercase tracking-wider mb-1`}>Bear Case</div><p className={T.bodyMuted}>{r.bearCase || "—"}</p></div>
+                      </div>
+                    )}
+                    {r.catalysts?.length > 0 && (
+                      <div className={`${T.catBox} border-l-2 rounded-sm px-3 py-2`}><div className={`${T.catLabel} text-xs uppercase tracking-wider mb-1`}>📅 Upcoming Catalysts</div><ul className={`${T.bodyMuted} space-y-0.5`}>{r.catalysts.map((c, idx) => <li key={idx}>{c}</li>)}</ul></div>
+                    )}
+                    <div className="flex items-start gap-2"><Eye size={14} className={`${T.watchIcon} mt-0.5 flex-shrink-0`} /><div><div className={`${T.label} text-xs uppercase tracking-wider mb-1`}>Watch For</div><ul className={`list-disc list-inside ${T.body} space-y-0.5`}>{r.watch?.map((w, idx) => <li key={idx}>{w}</li>)}</ul></div></div>
+                    {r.macroEvents?.length > 0 && (
+                      <div className={`${T.macroBox} border-l-2 rounded-sm px-3 py-2`}><div className={`${T.macroLabel} text-xs uppercase tracking-wider mb-1`}>🌍 Real-World Events</div><div className="space-y-2">{r.macroEvents.map((m, idx) => <div key={idx}><p className={T.body}>{m.event}</p><p className={`${T.macroSub} text-xs mt-0.5`}>{m.impact}</p></div>)}</div></div>
+                    )}
+                    {r.socialBuzz && (
+                      <div className={`${T.buzzBox} border-l-2 rounded-sm px-3 py-2`}><div className={`${T.buzzLabel} text-xs uppercase tracking-wider mb-1`}>💬 Street Talk</div><p className={`${T.bodyMuted} italic`}>{r.socialBuzz}</p></div>
+                    )}
+                    {r.sources?.length > 0 && (
+                      <div>
+                        <button onClick={() => setShowSources((s) => ({ ...s, [t]: !s[t] }))} className={`flex items-center gap-1 text-xs ${T.label} hover:underline`}><Link size={11} />{showSources[t] ? "Hide sources" : `Sources (${r.sources.length})`}</button>
+                        {showSources[t] && <ul className="mt-1 space-y-0.5 text-xs">{r.sources.map((s, idx) => <li key={idx} className="truncate"><a href={s.url} target="_blank" rel="noopener noreferrer" className={`${T.srcLink} underline`}>{s.title}</a></li>)}</ul>}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {r?.error && <p className={`${T.error} text-sm`}>{r.error}</p>}
+                {!r && !loading[t] && price === null && <p className={`${T.empty} text-sm`}>No analysis yet — click Analyze.</p>}
+              </div>
+            );
+          })}
           {tickers.length === 0 && <p className={`${T.empty} text-sm text-center py-8`}>Add a ticker to get started.</p>}
         </div>
       </div>
 
       {showSettings && (
-        <SettingsModal
-          T={T} anthropicKey={anthropicKey} finnhubKey={finnhubKey}
-          onSave={(ak, fk) => { saveKeys(ak, fk); setShowSettings(false); }}
-          onClose={() => setShowSettings(false)}
-        />
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => { if (anthropicKey && finnhubKey) setShowSettings(false); }}>
+          <div className={`${T.card} border rounded-sm p-5 max-w-md w-full`} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className={`text-lg font-bold ${T.title}`}>Settings</h2>
+              <button onClick={() => { if (anthropicKey && finnhubKey) setShowSettings(false); }} className={T.grip}><X size={16} /></button>
+            </div>
+            <p className={`${T.sub} text-xs mb-4`}>Keys are stored only in your browser (localStorage) and sent directly to each service. Nothing is logged or shared.</p>
+            <label className={`${T.label} text-xs uppercase tracking-wider`}>Anthropic API Key</label>
+            <input type="password" value={akInput} onChange={(e) => setAkInput(e.target.value)} placeholder="sk-ant-..." className={`w-full ${T.input} border rounded-sm px-3 py-2 text-sm focus:outline-none mb-1 mt-1 pf-mono`} />
+            <p className={`${T.meta} text-[10px] mb-3`}>Get one at console.anthropic.com → API Keys</p>
+            <label className={`${T.label} text-xs uppercase tracking-wider`}>Finnhub API Key (free)</label>
+            <input type="password" value={fkInput} onChange={(e) => setFkInput(e.target.value)} placeholder="your finnhub token" className={`w-full ${T.input} border rounded-sm px-3 py-2 text-sm focus:outline-none mb-1 mt-1 pf-mono`} />
+            <p className={`${T.meta} text-[10px] mb-4`}>Free key at finnhub.io/register</p>
+            <button onClick={() => { setAnthropicKey(akInput.trim()); setFinnhubKey(fkInput.trim()); lsSet(LS.anthropicKey, akInput.trim()); lsSet(LS.finnhubKey, fkInput.trim()); setShowSettings(false); }} disabled={!akInput.trim() || !fkInput.trim()} className={`${T.addBtn} disabled:opacity-50 rounded-sm px-4 py-2 text-sm font-medium w-full`}>Save Keys</button>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-// (TickerCard, DigestCard, SettingsModal, THEME_DARK, THEME_LIGHT follow in the
-//  next message — split out so each piece stays readable.)
+// ----------------------------------------------------------------------------
+// THEMES
+// ----------------------------------------------------------------------------
+const THEME_DARK = {
+  page: "bg-stone-950 text-stone-100", title: "text-amber-50", sub: "text-stone-400",
+  input: "bg-stone-900 border-stone-700 focus:border-amber-600 text-stone-100",
+  addBtn: "bg-amber-700 hover:bg-amber-600 text-white", allBtn: "bg-teal-700 hover:bg-teal-600 text-white",
+  card: "bg-stone-900 border-stone-800", cardDrag: "border-amber-600 shadow-lg shadow-amber-900/20",
+  tickerText: "text-amber-50", smallBtn: "bg-stone-800 hover:bg-stone-700 text-stone-200",
+  delBtn: "bg-stone-800 hover:bg-red-900 text-stone-200", grip: "text-stone-600 hover:text-stone-400",
+  meta: "text-stone-500", priceBox: "bg-stone-800/60 border-amber-600", priceText: "text-amber-50",
+  up: "text-teal-400", down: "text-red-400", label: "text-stone-400", body: "text-stone-200", bodyMuted: "text-stone-300",
+  bullBox: "bg-teal-950/40 border-teal-600", bullLabel: "text-teal-400", bearBox: "bg-red-950/30 border-red-700", bearLabel: "text-red-400",
+  catBox: "bg-stone-800/60 border-sky-600", catLabel: "text-sky-400", macroBox: "bg-amber-950/30 border-amber-600", macroLabel: "text-amber-400", macroSub: "text-stone-400",
+  buzzBox: "bg-violet-950/40 border-violet-600", buzzLabel: "text-violet-400", watchIcon: "text-amber-400",
+  empty: "text-stone-500", error: "text-red-400", stale: "text-amber-500 border-amber-700 bg-amber-950/40",
+  srcLink: "text-sky-400 hover:text-sky-300", noteBox: "bg-stone-800/40 border-stone-700", noteText: "text-stone-300",
+  digestBox: "bg-stone-900 border-stone-700", digestLabel: "text-amber-400", valueBar: "bg-stone-900 border-stone-700",
+  sharesInput: "bg-stone-800 border-stone-700 text-stone-200 focus:border-amber-600",
+};
+const THEME_LIGHT = {
+  page: "bg-orange-50 text-stone-800", title: "text-stone-800", sub: "text-stone-500",
+  input: "bg-white border-stone-300 focus:border-amber-400 text-stone-800",
+  addBtn: "bg-amber-400 hover:bg-amber-500 text-stone-900", allBtn: "bg-teal-400 hover:bg-teal-500 text-stone-900",
+  card: "bg-white border-stone-200 shadow-sm", cardDrag: "border-amber-400 shadow-lg shadow-amber-200/50",
+  tickerText: "text-stone-800", smallBtn: "bg-stone-100 hover:bg-stone-200 text-stone-600",
+  delBtn: "bg-stone-100 hover:bg-red-100 text-stone-600", grip: "text-stone-300 hover:text-stone-500",
+  meta: "text-stone-400", priceBox: "bg-amber-50 border-amber-400", priceText: "text-stone-800",
+  up: "text-teal-600", down: "text-red-500", label: "text-stone-500", body: "text-stone-700", bodyMuted: "text-stone-600",
+  bullBox: "bg-teal-50 border-teal-300", bullLabel: "text-teal-600", bearBox: "bg-red-50 border-red-300", bearLabel: "text-red-500",
+  catBox: "bg-sky-50 border-sky-300", catLabel: "text-sky-600", macroBox: "bg-amber-50 border-amber-300", macroLabel: "text-amber-600", macroSub: "text-stone-500",
+  buzzBox: "bg-violet-50 border-violet-300", buzzLabel: "text-violet-600", watchIcon: "text-amber-500",
+  empty: "text-stone-400", error: "text-red-500", stale: "text-amber-700 border-amber-300 bg-amber-100",
+  srcLink: "text-sky-600 hover:text-sky-500", noteBox: "bg-stone-50 border-stone-200", noteText: "text-stone-600",
+  digestBox: "bg-white border-stone-300 shadow-sm", digestLabel: "text-amber-600", valueBar: "bg-white border-stone-300 shadow-sm",
+  sharesInput: "bg-stone-50 border-stone-300 text-stone-700 focus:border-amber-400",
+};
